@@ -3,11 +3,14 @@ use rfd::FileDialog;
 use serde::{Serialize, Deserialize};
 use std::process::Command;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use std::thread;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use notify::{Watcher, RecursiveMode, Event, EventKind};
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct WatcherRow {
@@ -16,18 +19,15 @@ struct WatcherRow {
     is_watching: bool,
     #[serde(skip)]
     last_triggered: Option<Instant>,
-    #[serde(skip)]
-    file_count: usize,
 }
 
 impl Default for WatcherRow {
     fn default() -> Self {
         Self {
             path: String::new(),
-            commands: vec!["notify-send 'Änderung bemerkt' 'Eine Änderung wurde festgestellt.'".to_string()],
+            commands: vec!["notify-send -t 1000 'Eine Änderung wurde festgestellt.'".to_string()],
             is_watching: false,
             last_triggered: None,
-            file_count: 0,
         }
     }
 }
@@ -37,11 +37,10 @@ pub struct FolderWatcherApp {
     watcher_rows: Vec<WatcherRow>,
     all_watching: bool,
     #[serde(skip)]
-    rx: Option<mpsc::Receiver<(usize, usize)>>,
+    rx: Option<mpsc::Receiver<(usize, String)>>,
     #[serde(skip)]
-    stop_signal: Arc<Mutex<bool>>,
+    watchers: Vec<Option<notify::RecommendedWatcher>>,
 }
-
 impl FolderWatcherApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let mut app = if let Ok(json) = fs::read_to_string("config.json") {
@@ -50,20 +49,19 @@ impl FolderWatcherApp {
             Self::default()
         };
         
-        // Sammle die Indizes der Zeilen, die als "watching" markiert sind
         let watching_indices: Vec<usize> = app.watcher_rows.iter()
             .enumerate()
             .filter(|(_, row)| row.is_watching)
             .map(|(index, _)| index)
             .collect();
         
-        // Starte die Überwachung für alle gesammelten Indizes
         for &index in &watching_indices {
             app.start_watching(index);
         }
         
         app
     }
+
     fn save_config(&self) {
         let json = serde_json::to_string_pretty(self).unwrap();
         fs::write("config.json", json).expect("Unable to write config file");
@@ -71,6 +69,7 @@ impl FolderWatcherApp {
 
     fn add_new_row(&mut self) {
         self.watcher_rows.push(WatcherRow::default());
+        self.watchers.push(None);
         self.save_config();
     }
 
@@ -125,10 +124,8 @@ impl FolderWatcherApp {
                 if ui.button(if row.is_watching { "Stop" } else { "Start" }).clicked() {
                     row.is_watching = !row.is_watching;
                     if row.is_watching {
-                        println!("Überwachungsprozess für {} gestartet", row.path);
                         self.start_watching(row_index);
                     } else {
-                        println!("Überwachungsprozess für {} gestoppt", row.path);
                         self.stop_watching(row_index);
                     }
                     changed = true;
@@ -144,8 +141,6 @@ impl FolderWatcherApp {
                     let elapsed = last_triggered.elapsed();
                     ui.label(format!("Zuletzt ausgelöst: vor {} Sekunden", elapsed.as_secs()));
                 }
-
-                ui.label(format!("Dateien im Ordner: {}", row.file_count));
             });
         });
 
@@ -156,48 +151,73 @@ impl FolderWatcherApp {
 
         remove
     }
-
     fn start_watching(&mut self, row_index: usize) {
+        if row_index >= self.watcher_rows.len() {
+            eprintln!("Ungültiger row_index: {}", row_index);
+            return;
+        }
+    
         let row = &mut self.watcher_rows[row_index];
-        let path = row.path.clone();
+        let path = PathBuf::from(&row.path);
         let commands = row.commands.clone();
         
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
-
-        let stop_signal = Arc::clone(&self.stop_signal);
-
-        thread::spawn(move || {
-            let mut last_count = count_files(&path);
-            println!("Initiale Anzahl der Dateien in {}: {}", path, last_count);
-            
-            while !*stop_signal.lock().unwrap() {
-                thread::sleep(Duration::from_secs(1));
-                let current_count = count_files(&path);
-                if current_count != last_count {
-                    println!("Änderung in {} erkannt. Neue Anzahl: {}", path, current_count);
-                    if let Err(e) = tx.send((row_index, current_count)) {
-                        eprintln!("Fehler beim Senden der Änderung: {}", e);
-                        break;
+    
+        let event_tx = tx.clone();
+        let mut last_event_time = Instant::now();
+        let mut changed_files = HashSet::new();
+        let debounce_duration = Duration::from_millis(500);
+    
+        let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
+            match res {
+                Ok(event) => {
+                    match event.kind {
+                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
+                            for path in event.paths.iter() {
+                                changed_files.insert(path.to_path_buf());
+                            }
+    
+                            let now = Instant::now();
+                            if now.duration_since(last_event_time) > debounce_duration {
+                                if !changed_files.is_empty() {
+                                    let message = format!("{} Dateien wurden geändert", changed_files.len());
+                                    event_tx.send((row_index, message)).unwrap_or_else(|e| eprintln!("Fehler beim Senden der Änderung: {}", e));
+                                    changed_files.clear();
+                                }
+                                last_event_time = now;
+                            }
+                        },
+                        _ => {}
                     }
-                    for command in &commands {
-                        if let Err(e) = Command::new("sh")
-                            .arg("-c")
-                            .arg(command)
-                            .spawn() {
-                            eprintln!("Fehler beim Ausführen des Befehls: {}", e);
-                        }
-                    }
-                    last_count = current_count;
-                }
+                },
+                Err(e) => eprintln!("Fehler beim Überwachen: {:?}", e),
             }
-        });
+        }).unwrap();
+    
+        while self.watchers.len() <= row_index {
+            self.watchers.push(None);
+        }
+    
+        if let Err(e) = watcher.watch(&path, RecursiveMode::Recursive) {
+            eprintln!("Fehler beim Starten der Überwachung für {}: {:?}", path.display(), e);
+            return;
+        }
+    
+        self.watchers[row_index] = Some(watcher);
+    
+        row.is_watching = true;
+        println!("Überwachungsprozess für {} gestartet", row.path);
     }
-
+    
+    
     fn stop_watching(&mut self, row_index: usize) {
         let row = &mut self.watcher_rows[row_index];
         row.is_watching = false;
-        *self.stop_signal.lock().unwrap() = true;
+        if let Some(watcher) = self.watchers[row_index].take() {
+            drop(watcher);
+        }
+        println!("Überwachungsprozess für {} gestoppt", row.path);
     }
 
     fn toggle_all_watchers(&mut self) {
@@ -215,10 +235,18 @@ impl FolderWatcherApp {
 
     fn check_for_updates(&mut self) {
         if let Some(rx) = &self.rx {
-            if let Ok((row_index, new_count)) = rx.try_recv() {
+            while let Ok((row_index, message)) = rx.try_recv() {
                 if let Some(row) = self.watcher_rows.get_mut(row_index) {
-                    row.file_count = new_count;
+                    println!("{}", message);
                     row.last_triggered = Some(Instant::now());
+                    for command in &row.commands {
+                        if let Err(e) = Command::new("sh")
+                            .arg("-c")
+                            .arg(command)
+                            .spawn() {
+                            eprintln!("Fehler beim Ausführen des Befehls: {}", e);
+                        }
+                    }
                 }
             }
         }
@@ -231,7 +259,7 @@ impl Default for FolderWatcherApp {
             watcher_rows: vec![WatcherRow::default()],
             all_watching: false,
             rx: None,
-            stop_signal: Arc::new(Mutex::new(false)),
+            watchers: vec![None],
         }
     }
 }
@@ -268,10 +296,4 @@ impl eframe::App for FolderWatcherApp {
 
         ctx.request_repaint();
     }
-}
-
-fn count_files<P: AsRef<Path>>(path: P) -> usize {
-    fs::read_dir(path)
-        .map(|entries| entries.filter(|e| e.is_ok()).count())
-        .unwrap_or(0)
 }
