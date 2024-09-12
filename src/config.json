@@ -1,0 +1,19 @@
+{
+  "watcher_rows": [
+    {
+      "path": "/home/alex/Schreibtisch",
+      "commands": [
+        "notify-send 'Änderung bemerkt' 'Eine Änderung wurde festgestellt.'"
+      ],
+      "is_watching": false
+    },
+    {
+      "path": "/home/alex/Downloads",
+      "commands": [
+        "notify-send 'Änderung bemerkt' 'Eine Änderung wurde festgestellt.'"
+      ],
+      "is_watching": true
+    }
+  ],
+  "all_watching": true
+}
