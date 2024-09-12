@@ -1,0 +1,40 @@
+{
+  "watcher_rows": [
+    {
+      "path": "/home/alex/Downloads",
+      "commands": [
+        "notify-send 'Änderung bemerkt' 'Eine Änderung wurde festgestellt.'"
+      ],
+      "is_watching": true
+    },
+    {
+      "path": "",
+      "commands": [
+        "notify-send 'Änderung bemerkt' 'Eine Änderung wurde festgestellt.'"
+      ],
+      "is_watching": false
+    },
+    {
+      "path": "",
+      "commands": [
+        "notify-send 'Änderung bemerkt' 'Eine Änderung wurde festgestellt.'"
+      ],
+      "is_watching": false
+    },
+    {
+      "path": "",
+      "commands": [
+        "notify-send 'Änderung bemerkt' 'Eine Änderung wurde festgestellt.'"
+      ],
+      "is_watching": false
+    },
+    {
+      "path": "",
+      "commands": [
+        "notify-send 'Änderung bemerkt' 'Eine Änderung wurde festgestellt.'"
+      ],
+      "is_watching": false
+    }
+  ],
+  "all_watching": false
+}

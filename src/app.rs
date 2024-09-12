@@ -7,6 +7,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use std::thread;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Serialize, Deserialize)]
 struct WatcherRow {
@@ -37,17 +38,32 @@ pub struct FolderWatcherApp {
     all_watching: bool,
     #[serde(skip)]
     rx: Option<mpsc::Receiver<(usize, usize)>>,
+    #[serde(skip)]
+    stop_signal: Arc<Mutex<bool>>,
 }
 
 impl FolderWatcherApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        if let Ok(json) = fs::read_to_string("config.json") {
+        let mut app = if let Ok(json) = fs::read_to_string("config.json") {
             serde_json::from_str(&json).unwrap_or_else(|_| Self::default())
         } else {
             Self::default()
+        };
+        
+        // Sammle die Indizes der Zeilen, die als "watching" markiert sind
+        let watching_indices: Vec<usize> = app.watcher_rows.iter()
+            .enumerate()
+            .filter(|(_, row)| row.is_watching)
+            .map(|(index, _)| index)
+            .collect();
+        
+        // Starte die Überwachung für alle gesammelten Indizes
+        for &index in &watching_indices {
+            app.start_watching(index);
         }
+        
+        app
     }
-
     fn save_config(&self) {
         let json = serde_json::to_string_pretty(self).unwrap();
         fs::write("config.json", json).expect("Unable to write config file");
@@ -149,16 +165,21 @@ impl FolderWatcherApp {
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
 
+        let stop_signal = Arc::clone(&self.stop_signal);
+
         thread::spawn(move || {
             let mut last_count = count_files(&path);
             println!("Initiale Anzahl der Dateien in {}: {}", path, last_count);
             
-            loop {
+            while !*stop_signal.lock().unwrap() {
                 thread::sleep(Duration::from_secs(1));
                 let current_count = count_files(&path);
                 if current_count != last_count {
                     println!("Änderung in {} erkannt. Neue Anzahl: {}", path, current_count);
-                    tx.send((row_index, current_count)).unwrap();
+                    if let Err(e) = tx.send((row_index, current_count)) {
+                        eprintln!("Fehler beim Senden der Änderung: {}", e);
+                        break;
+                    }
                     for command in &commands {
                         if let Err(e) = Command::new("sh")
                             .arg("-c")
@@ -176,7 +197,7 @@ impl FolderWatcherApp {
     fn stop_watching(&mut self, row_index: usize) {
         let row = &mut self.watcher_rows[row_index];
         row.is_watching = false;
-        // Hier könnten wir den Thread stoppen, wenn wir eine Möglichkeit hätten, ihn zu identifizieren
+        *self.stop_signal.lock().unwrap() = true;
     }
 
     fn toggle_all_watchers(&mut self) {
@@ -210,6 +231,7 @@ impl Default for FolderWatcherApp {
             watcher_rows: vec![WatcherRow::default()],
             all_watching: false,
             rx: None,
+            stop_signal: Arc::new(Mutex::new(false)),
         }
     }
 }
