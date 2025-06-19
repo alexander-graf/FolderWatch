@@ -1,9 +1,16 @@
 {
   "watcher_rows": [
     {
-      "path": "/home/alex/Downloads",
+      "path": "C:\\touchme",
       "commands": [
         "notify-send -t 1000 'Eine Änderung wurde festgestellt.'"
+      ],
+      "is_watching": true
+    },
+    {
+      "path": "C:\\touchme\\backup",
+      "commands": [
+        "toast:Eine Änderung wurde festgestellt."
       ],
       "is_watching": true
     }

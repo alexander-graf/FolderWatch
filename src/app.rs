@@ -11,6 +11,12 @@ use std::sync::{Arc, Mutex};
 use notify::{Watcher, RecursiveMode, Event, EventKind};
 use std::collections::HashMap;
 use std::collections::HashSet;
+use winrt_notification::{Duration as ToastDuration, Sound, Toast};
+use std::fs::OpenOptions;
+use std::io::Write;
+use chrono;
+
+const APP_ID: &str = "crazykungfu.FolderWatch";
 
 #[derive(Clone, Serialize, Deserialize)]
 struct WatcherRow {
@@ -25,7 +31,7 @@ impl Default for WatcherRow {
     fn default() -> Self {
         Self {
             path: String::new(),
-            commands: vec!["notify-send -t 1000 'Eine Änderung wurde festgestellt.'".to_string()],
+            commands: vec!["toast:Eine Änderung wurde festgestellt.".to_string()],
             is_watching: false,
             last_triggered: None,
         }
@@ -167,7 +173,7 @@ impl FolderWatcherApp {
         let event_tx = tx.clone();
         let mut last_event_time = Instant::now();
         let mut changed_files = HashSet::new();
-        let debounce_duration = Duration::from_millis(500);
+        let debounce_duration = Duration::from_millis(5000);
     
         let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
             match res {
@@ -233,23 +239,39 @@ impl FolderWatcherApp {
         self.save_config();
     }
 
-    fn check_for_updates(&mut self) {
+    fn check_for_updates(&mut self) -> bool {
+        let mut repaint = false;
         if let Some(rx) = &self.rx {
             while let Ok((row_index, message)) = rx.try_recv() {
                 if let Some(row) = self.watcher_rows.get_mut(row_index) {
                     println!("{}", message);
                     row.last_triggered = Some(Instant::now());
+                    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                    let log_entry = format!("[{}] Änderung in '{}': {}\n", timestamp, row.path, message);
+                    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("folderwatch.log") {
+                        let _ = file.write_all(log_entry.as_bytes());
+                    }
                     for command in &row.commands {
-                        if let Err(e) = Command::new("sh")
-                            .arg("-c")
-                            .arg(command)
-                            .spawn() {
-                            eprintln!("Fehler beim Ausführen des Befehls: {}", e);
+                        if command.starts_with("toast:") {
+                            let text = command.trim_start_matches("toast:");
+                            let toast_text = format!("{}\nPfad: {}\nZeit: {}", text, row.path, timestamp);
+                            if let Err(e) = Toast::new(APP_ID)
+                                .title("FolderWatch: Änderung erkannt")
+                                .text1(&toast_text)
+                                .sound(Some(Sound::Default))
+                                .duration(ToastDuration::Short)
+                                .show() {
+                                eprintln!("Fehler beim Anzeigen der Toast-Benachrichtigung: {}", e);
+                            }
+                        } else {
+                            // Hier könnten weitere Windows-spezifische Kommandos ergänzt werden
                         }
                     }
+                    repaint = true;
                 }
             }
         }
+        repaint
     }
 }
 
@@ -266,7 +288,7 @@ impl Default for FolderWatcherApp {
 
 impl eframe::App for FolderWatcherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.check_for_updates();
+        let repaint_needed = self.check_for_updates();
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Ordner-Überwachung");
@@ -294,6 +316,9 @@ impl eframe::App for FolderWatcherApp {
             }
         });
 
-        ctx.request_repaint();
+        if repaint_needed {
+            ctx.request_repaint();
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
     }
 }
